@@ -1,0 +1,67 @@
+{
+  "simulation_parameters": {
+    "town": "Town05",
+    "weather": {
+      "cloudiness": 0,
+      "precipitation": 0,
+      "precipitation_deposits": 0,
+      "wind_intensity": 0,
+      "sun_azimuth_angle": 70,
+      "sun_altitude_angle": 70,
+      "fog_density": 0,
+      "fog_distance": 0,
+      "wetness": 0
+    },
+    "actors": {
+      "vehicles": {
+        "count": 50,
+        "safe_distance": 5.0,
+        "speed_factor": 1.0
+      },
+      "pedestrians": {
+        "count": 30,
+        "safe_distance": 2.0,
+        "speed_factor": 0.8
+      },
+      "cyclists": {
+        "count": 15,
+        "safe_distance": 3.0,
+        "speed_factor": 1.2
+      }
+    },
+    "data_collection": {
+      "frames_per_second": 10,
+      "duration_seconds": 300,
+      "sensors": {
+        "rgb_camera": {
+          "width": 1280,
+          "height": 720,
+          "fov": 90,
+          "position": [1.5, 0.0, 2.4],
+          "rotation": [0.0, 0.0, 0.0]
+        },
+        "depth_camera": {
+          "width": 1280,
+          "height": 720,
+          "fov": 90,
+          "position": [1.5, 0.0, 2.4],
+          "rotation": [0.0, 0.0, 0.0]
+        },
+        "semantic_segmentation": {
+          "width": 1280,
+          "height": 720,
+          "fov": 90,
+          "position": [1.5, 0.0, 2.4],
+          "rotation": [0.0, 0.0, 0.0]
+        },
+        "lidar": {
+          "channels": 64,
+          "range": 100,
+          "points_per_second": 500000,
+          "rotation_frequency": 10,
+          "position": [0.0, 0.0, 2.4]
+        }
+      }
+    }
+  }
+}

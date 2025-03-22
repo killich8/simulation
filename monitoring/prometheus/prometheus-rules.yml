@@ -1,0 +1,92 @@
+groups:
+- name: road-object-detection-alerts
+  rules:
+  - alert: HighCPUUsage
+    expr: avg(rate(container_cpu_usage_seconds_total{namespace="road-object-detection"}[5m])) by (pod) > 0.8
+    for: 5m
+    labels:
+      severity: warning
+    annotations:
+      summary: "High CPU usage detected"
+      description: "Pod {{ $labels.pod }} has high CPU usage (> 80%) for more than 5 minutes."
+
+  - alert: HighMemoryUsage
+    expr: avg(container_memory_usage_bytes{namespace="road-object-detection"}) by (pod) / avg(container_spec_memory_limit_bytes{namespace="road-object-detection"}) by (pod) > 0.8
+    for: 5m
+    labels:
+      severity: warning
+    annotations:
+      summary: "High memory usage detected"
+      description: "Pod {{ $labels.pod }} has high memory usage (> 80%) for more than 5 minutes."
+
+  - alert: PodCrashLooping
+    expr: increase(kube_pod_container_status_restarts_total{namespace="road-object-detection"}[15m]) > 3
+    for: 5m
+    labels:
+      severity: critical
+    annotations:
+      summary: "Pod is crash looping"
+      description: "Pod {{ $labels.pod }} is crash looping (restarted more than 3 times in 15 minutes)."
+
+  - alert: ModelInferenceHighLatency
+    expr: histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket{job="model-inference",handler="/predict"}[5m])) by (le)) > 0.5
+    for: 5m
+    labels:
+      severity: warning
+    annotations:
+      summary: "High inference latency detected"
+      description: "Model inference service has high latency (95th percentile > 500ms) for more than 5 minutes."
+
+  - alert: ModelInferenceHighErrorRate
+    expr: sum(rate(http_requests_total{job="model-inference",status=~"5.."}[5m])) / sum(rate(http_requests_total{job="model-inference"}[5m])) > 0.05
+    for: 5m
+    labels:
+      severity: critical
+    annotations:
+      summary: "High error rate detected"
+      description: "Model inference service has high error rate (> 5%) for more than 5 minutes."
+
+  - alert: DataProcessingJobFailed
+    expr: kube_job_status_failed{namespace="road-object-detection",job_name=~"data-processing-.*"} > 0
+    for: 1m
+    labels:
+      severity: critical
+    annotations:
+      summary: "Data processing job failed"
+      description: "Data processing job {{ $labels.job_name }} has failed."
+
+  - alert: ModelTrainingJobFailed
+    expr: kube_job_status_failed{namespace="road-object-detection",job_name=~"model-training-.*"} > 0
+    for: 1m
+    labels:
+      severity: critical
+    annotations:
+      summary: "Model training job failed"
+      description: "Model training job {{ $labels.job_name }} has failed."
+
+  - alert: CarlaSimulationDown
+    expr: up{job="carla-simulation"} == 0
+    for: 5m
+    labels:
+      severity: critical
+    annotations:
+      summary: "CARLA simulation service is down"
+      description: "CARLA simulation service has been down for more than 5 minutes."
+
+  - alert: LowDiskSpace
+    expr: (node_filesystem_avail_bytes{mountpoint="/"} / node_filesystem_size_bytes{mountpoint="/"}) * 100 < 10
+    for: 5m
+    labels:
+      severity: warning
+    annotations:
+      summary: "Low disk space"
+      description: "Node {{ $labels.instance }} has less than 10% free disk space."
+
+  - alert: GPUHighUtilization
+    expr: nvidia_gpu_duty_cycle > 90
+    for: 10m
+    labels:
+      severity: warning
+    annotations:
+      summary: "High GPU utilization"
+      description: "GPU on {{ $labels.instance }} has high utilization (> 90%) for more than 10 minutes."

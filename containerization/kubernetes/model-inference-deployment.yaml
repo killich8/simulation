@@ -1,0 +1,182 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: model-inference
+  namespace: road-object-detection
+  labels:
+    app: model-inference
+    component: inference
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: model-inference
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        app: model-inference
+        component: inference
+    spec:
+      nodeSelector:
+        accelerator: gpu
+      tolerations:
+      - key: "nvidia.com/gpu"
+        operator: "Exists"
+        effect: "NoSchedule"
+      containers:
+      - name: model-inference
+        image: ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/road-object-detection/model-inference:latest
+        imagePullPolicy: Always
+        resources:
+          limits:
+            cpu: "4"
+            memory: "8Gi"
+            nvidia.com/gpu: 1
+          requests:
+            cpu: "2"
+            memory: "4Gi"
+            nvidia.com/gpu: 1
+        env:
+        - name: AWS_REGION
+          valueFrom:
+            configMapKeyRef:
+              name: aws-config
+              key: region
+        - name: AWS_ACCESS_KEY_ID
+          valueFrom:
+            secretKeyRef:
+              name: aws-credentials
+              key: access_key
+        - name: AWS_SECRET_ACCESS_KEY
+          valueFrom:
+            secretKeyRef:
+              name: aws-credentials
+              key: secret_key
+        - name: MODEL_DIR
+          value: "/data/models"
+        - name: IMAGES_DIR
+          value: "/data/images"
+        - name: RESULTS_DIR
+          value: "/data/results"
+        - name: S3_MODEL_BUCKET
+          valueFrom:
+            configMapKeyRef:
+              name: aws-config
+              key: model_artifacts_bucket
+        - name: S3_MODEL_KEY
+          value: "models/best.pt"
+        volumeMounts:
+        - name: inference-config
+          mountPath: /app/model_inference/config.json
+          subPath: config.json
+        - name: data-volume
+          mountPath: /data
+        ports:
+        - containerPort: 8000
+          name: http
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 15
+          periodSeconds: 5
+      volumes:
+      - name: inference-config
+        configMap:
+          name: inference-config
+      - name: data-volume
+        persistentVolumeClaim:
+          claimName: inference-data-pvc
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: model-inference
+  namespace: road-object-detection
+  labels:
+    app: model-inference
+    component: inference
+spec:
+  type: ClusterIP
+  ports:
+  - port: 80
+    targetPort: 8000
+    protocol: TCP
+    name: http
+  selector:
+    app: model-inference
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: model-inference-ingress
+  namespace: road-object-detection
+  annotations:
+    kubernetes.io/ingress.class: "alb"
+    alb.ingress.kubernetes.io/scheme: "internet-facing"
+    alb.ingress.kubernetes.io/target-type: "ip"
+    alb.ingress.kubernetes.io/healthcheck-path: "/health"
+spec:
+  rules:
+  - http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: model-inference
+            port:
+              number: 80
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: inference-config
+  namespace: road-object-detection
+data:
+  config.json: |
+    {
+      "model_path": "/data/models/best.pt",
+      "confidence_threshold": 0.25,
+      "iou_threshold": 0.45,
+      "max_detections": 100,
+      "classes": [
+        "car",
+        "pedestrian",
+        "bicycle",
+        "cyclist",
+        "motorcycle",
+        "truck",
+        "bus",
+        "traffic_light",
+        "traffic_sign",
+        "stop_sign"
+      ],
+      "image_size": 640,
+      "save_results": true,
+      "results_path": "/data/results"
+    }
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: inference-data-pvc
+  namespace: road-object-detection
+spec:
+  accessModes:
+    - ReadWriteMany
+  storageClassName: efs-sc
+  resources:
+    requests:
+      storage: 50Gi

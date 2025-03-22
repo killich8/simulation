@@ -1,0 +1,57 @@
+# AWS Infrastructure Configuration
+
+# General AWS Settings
+aws_region = "us-west-2"
+aws_profile = "default"
+project_name = "road-object-detection"
+environment = "dev"
+
+# VPC Configuration
+vpc_cidr = "10.0.0.0/16"
+public_subnets = ["10.0.1.0/24", "10.0.2.0/24"]
+private_subnets = ["10.0.3.0/24", "10.0.4.0/24"]
+
+# EC2 Configuration
+ec2_instance_type = "g4dn.xlarge"  # GPU instance for simulation and training
+ec2_key_name = "road-detection-key"
+ec2_volume_size = 100  # GB
+
+# EKS Configuration
+eks_cluster_name = "road-detection-cluster"
+eks_cluster_version = "1.24"
+eks_node_group_instance_types = ["g4dn.xlarge"]
+eks_node_group_desired_capacity = 2
+eks_node_group_min_size = 1
+eks_node_group_max_size = 5
+
+# S3 Configuration
+s3_bucket_name = "road-detection-data"
+s3_versioning = true
+s3_lifecycle_rules = [
+  {
+    enabled = true
+    prefix = "raw/"
+    expiration_days = 90
+  },
+  {
+    enabled = true
+    prefix = "processed/"
+    expiration_days = 180
+  }
+]
+
+# ECR Configuration
+ecr_repositories = [
+  "carla-simulation",
+  "data-processing",
+  "model-training",
+  "model-inference"
+]
+
+# CloudWatch Configuration
+cloudwatch_log_retention_days = 30
+cloudwatch_alarm_evaluation_periods = 3
+cloudwatch_alarm_period = 60  # seconds
+
+# IAM Configuration
+iam_permissions_boundary = ""

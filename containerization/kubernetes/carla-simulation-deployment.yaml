@@ -1,0 +1,178 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: carla-simulation
+  namespace: road-object-detection
+  labels:
+    app: carla-simulation
+    component: simulation
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: carla-simulation
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        app: carla-simulation
+        component: simulation
+    spec:
+      nodeSelector:
+        accelerator: gpu
+      tolerations:
+      - key: "nvidia.com/gpu"
+        operator: "Exists"
+        effect: "NoSchedule"
+      containers:
+      - name: carla-simulation
+        image: ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/road-object-detection/carla-simulation:latest
+        imagePullPolicy: Always
+        resources:
+          limits:
+            cpu: "4"
+            memory: "16Gi"
+            nvidia.com/gpu: 1
+          requests:
+            cpu: "2"
+            memory: "8Gi"
+            nvidia.com/gpu: 1
+        env:
+        - name: AWS_REGION
+          valueFrom:
+            configMapKeyRef:
+              name: aws-config
+              key: region
+        - name: S3_BUCKET
+          valueFrom:
+            configMapKeyRef:
+              name: aws-config
+              key: raw_data_bucket
+        volumeMounts:
+        - name: simulation-config
+          mountPath: /app/simulation/simulation_config.json
+          subPath: simulation_config.json
+        - name: data-volume
+          mountPath: /data
+        ports:
+        - containerPort: 2000
+          name: carla-rpc
+        - containerPort: 2001
+          name: carla-streaming
+        livenessProbe:
+          exec:
+            command:
+            - pgrep
+            - CarlaUE4-Linux
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          exec:
+            command:
+            - python3
+            - -c
+            - |
+              import socket
+              s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+              try:
+                s.connect(("localhost", 2000))
+                s.close()
+                exit(0)
+              except:
+                exit(1)
+          initialDelaySeconds: 15
+          periodSeconds: 5
+      volumes:
+      - name: simulation-config
+        configMap:
+          name: simulation-config
+      - name: data-volume
+        persistentVolumeClaim:
+          claimName: simulation-data-pvc
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: carla-simulation
+  namespace: road-object-detection
+  labels:
+    app: carla-simulation
+    component: simulation
+spec:
+  type: ClusterIP
+  ports:
+  - port: 2000
+    targetPort: 2000
+    protocol: TCP
+    name: carla-rpc
+  - port: 2001
+    targetPort: 2001
+    protocol: TCP
+    name: carla-streaming
+  selector:
+    app: carla-simulation
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: simulation-config
+  namespace: road-object-detection
+data:
+  simulation_config.json: |
+    {
+      "town": "Town05",
+      "num_vehicles": 50,
+      "num_pedestrians": 30,
+      "num_cyclists": 20,
+      "weather": "ClearNoon",
+      "simulation_time": 600,
+      "frame_rate": 10,
+      "sensors": [
+        {
+          "type": "camera.rgb",
+          "width": 1280,
+          "height": 720,
+          "fov": 90,
+          "position": [0.8, 0.0, 1.7],
+          "rotation": [0.0, 0.0, 0.0]
+        },
+        {
+          "type": "camera.semantic_segmentation",
+          "width": 1280,
+          "height": 720,
+          "fov": 90,
+          "position": [0.8, 0.0, 1.7],
+          "rotation": [0.0, 0.0, 0.0]
+        },
+        {
+          "type": "lidar.ray_cast",
+          "range": 50,
+          "rotation_frequency": 20,
+          "channels": 64,
+          "points_per_second": 100000,
+          "upper_fov": 10,
+          "lower_fov": -30,
+          "position": [0.0, 0.0, 2.0],
+          "rotation": [0.0, 0.0, 0.0]
+        }
+      ],
+      "output_format": "yolo",
+      "output_path": "/data/raw"
+    }
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: simulation-data-pvc
+  namespace: road-object-detection
+spec:
+  accessModes:
+    - ReadWriteMany
+  storageClassName: efs-sc
+  resources:
+    requests:
+      storage: 100Gi

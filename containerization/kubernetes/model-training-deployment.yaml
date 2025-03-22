@@ -1,0 +1,165 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: model-training
+  namespace: road-object-detection
+  labels:
+    app: model-training
+    component: training
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: model-training
+  strategy:
+    type: Recreate  # Use Recreate since training jobs shouldn't run in parallel
+  template:
+    metadata:
+      labels:
+        app: model-training
+        component: training
+    spec:
+      nodeSelector:
+        accelerator: gpu
+      tolerations:
+      - key: "nvidia.com/gpu"
+        operator: "Exists"
+        effect: "NoSchedule"
+      containers:
+      - name: model-training
+        image: ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/road-object-detection/model-training:latest
+        imagePullPolicy: Always
+        resources:
+          limits:
+            cpu: "8"
+            memory: "32Gi"
+            nvidia.com/gpu: 1
+          requests:
+            cpu: "4"
+            memory: "16Gi"
+            nvidia.com/gpu: 1
+        env:
+        - name: AWS_REGION
+          valueFrom:
+            configMapKeyRef:
+              name: aws-config
+              key: region
+        - name: AWS_ACCESS_KEY_ID
+          valueFrom:
+            secretKeyRef:
+              name: aws-credentials
+              key: access_key
+        - name: AWS_SECRET_ACCESS_KEY
+          valueFrom:
+            secretKeyRef:
+              name: aws-credentials
+              key: secret_key
+        - name: DATASET_DIR
+          value: "/data/datasets"
+        - name: MODEL_DIR
+          value: "/data/models"
+        - name: RESULTS_DIR
+          value: "/data/results"
+        - name: S3_DATASET_BUCKET
+          valueFrom:
+            configMapKeyRef:
+              name: aws-config
+              key: processed_data_bucket
+        - name: S3_DATASET_KEY
+          value: "processed_data/latest"
+        - name: S3_WEIGHTS_BUCKET
+          valueFrom:
+            configMapKeyRef:
+              name: aws-config
+              key: model_artifacts_bucket
+        - name: S3_WEIGHTS_KEY
+          value: "pretrained/yolov5s.pt"
+        volumeMounts:
+        - name: training-config
+          mountPath: /app/model_training/config.yaml
+          subPath: config.yaml
+        - name: data-volume
+          mountPath: /data
+        command:
+        - python
+        - -m
+        - model_training.train
+        - --data
+        - /data/datasets/data.yaml
+        - --cfg
+        - /app/model_training/models/yolov5s.yaml
+        - --weights
+        - yolov5s.pt
+        - --batch-size
+        - "16"
+        - --epochs
+        - "100"
+        - --img
+        - "640"
+        - --name
+        - road-object-detection
+      volumes:
+      - name: training-config
+        configMap:
+          name: training-config
+      - name: data-volume
+        persistentVolumeClaim:
+          claimName: training-data-pvc
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: training-config
+  namespace: road-object-detection
+data:
+  config.yaml: |
+    # YOLOv5 configuration for road object detection
+    # Training parameters
+    epochs: 100
+    batch_size: 16
+    img_size: 640
+    
+    # Model parameters
+    model_type: yolov5s
+    pretrained: true
+    
+    # Dataset parameters
+    classes:
+      - car
+      - pedestrian
+      - bicycle
+      - cyclist
+      - motorcycle
+      - truck
+      - bus
+      - traffic_light
+      - traffic_sign
+      - stop_sign
+    
+    # Augmentation parameters
+    augmentation:
+      hsv_h: 0.015
+      hsv_s: 0.7
+      hsv_v: 0.4
+      degrees: 0.0
+      translate: 0.1
+      scale: 0.5
+      shear: 0.0
+      perspective: 0.0
+      flipud: 0.0
+      fliplr: 0.5
+      mosaic: 1.0
+      mixup: 0.0
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: training-data-pvc
+  namespace: road-object-detection
+spec:
+  accessModes:
+    - ReadWriteMany
+  storageClassName: efs-sc
+  resources:
+    requests:
+      storage: 200Gi

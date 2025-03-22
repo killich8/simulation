@@ -1,0 +1,99 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual Environment
+venv/
+ENV/
+.env
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# CARLA
+_out/
+.carla-dist/
+
+# Data
+*.jpg
+*.png
+*.jpeg
+*.bmp
+*.tif
+*.tiff
+*.h5
+*.hdf5
+*.npy
+*.npz
+data/
+datasets/
+!**/examples/*.jpg
+!**/examples/*.png
+
+# AWS
+.aws/
+.terraform/
+terraform.tfstate
+terraform.tfstate.backup
+.terraform.lock.hcl
+
+# Docker
+.docker/
+
+# Kubernetes
+kubeconfig
+
+# Jenkins
+.jenkins/
+
+# Logs
+logs/
+*.log
+
+# Model files
+*.pt
+*.pth
+*.weights
+*.onnx
+runs/
+wandb/
+
+# Compiled files
+*.o
+*.so
+*.dylib
+*.dll
+*.exe
+
+# OS specific
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db

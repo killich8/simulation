@@ -1,0 +1,121 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: carla-simulation
+  namespace: road-detection
+  labels:
+    app: carla-simulation
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: carla-simulation
+  template:
+    metadata:
+      labels:
+        app: carla-simulation
+    spec:
+      containers:
+      - name: carla-simulation
+        image: ${ECR_REPOSITORY_URL}/carla-simulation:latest
+        ports:
+        - containerPort: 2000
+        - containerPort: 2001
+        - containerPort: 2002
+        resources:
+          limits:
+            nvidia.com/gpu: 1
+          requests:
+            memory: "4Gi"
+            cpu: "2"
+        volumeMounts:
+        - name: config-volume
+          mountPath: /app/config
+        - name: output-volume
+          mountPath: /app/output
+        env:
+        - name: CARLA_SERVER_TIMEOUT
+          value: "100"
+        - name: CARLA_TOWN
+          valueFrom:
+            configMapKeyRef:
+              name: simulation-config
+              key: town
+      volumes:
+      - name: config-volume
+        configMap:
+          name: simulation-config
+      - name: output-volume
+        persistentVolumeClaim:
+          claimName: simulation-data-pvc
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: carla-simulation
+  namespace: road-detection
+spec:
+  selector:
+    app: carla-simulation
+  ports:
+  - name: carla-server
+    port: 2000
+    targetPort: 2000
+  - name: carla-streaming
+    port: 2001
+    targetPort: 2001
+  - name: carla-control
+    port: 2002
+    targetPort: 2002
+  type: ClusterIP
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: simulation-config
+  namespace: road-detection
+data:
+  town: "Town05"
+  weather: |
+    {
+      "cloudiness": 0,
+      "precipitation": 0,
+      "precipitation_deposits": 0,
+      "wind_intensity": 0,
+      "sun_azimuth_angle": 70,
+      "sun_altitude_angle": 70,
+      "fog_density": 0,
+      "fog_distance": 0,
+      "wetness": 0
+    }
+  actors: |
+    {
+      "vehicles": {
+        "count": 50,
+        "safe_distance": 5.0,
+        "speed_factor": 1.0
+      },
+      "pedestrians": {
+        "count": 30,
+        "safe_distance": 2.0,
+        "speed_factor": 0.8
+      },
+      "cyclists": {
+        "count": 15,
+        "safe_distance": 3.0,
+        "speed_factor": 1.2
+      }
+    }
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: simulation-data-pvc
+  namespace: road-detection
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 100Gi
+  storageClassName: gp2

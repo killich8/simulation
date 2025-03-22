@@ -1,0 +1,137 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: data-processing
+  namespace: road-object-detection
+  labels:
+    app: data-processing
+    component: processing
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: data-processing
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        app: data-processing
+        component: processing
+    spec:
+      containers:
+      - name: data-processing
+        image: ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/road-object-detection/data-processing:latest
+        imagePullPolicy: Always
+        resources:
+          limits:
+            cpu: "4"
+            memory: "8Gi"
+          requests:
+            cpu: "2"
+            memory: "4Gi"
+        env:
+        - name: AWS_REGION
+          valueFrom:
+            configMapKeyRef:
+              name: aws-config
+              key: region
+        - name: AWS_ACCESS_KEY_ID
+          valueFrom:
+            secretKeyRef:
+              name: aws-credentials
+              key: access_key
+        - name: AWS_SECRET_ACCESS_KEY
+          valueFrom:
+            secretKeyRef:
+              name: aws-credentials
+              key: secret_key
+        - name: DATA_INPUT_DIR
+          value: "/data/input"
+        - name: DATA_OUTPUT_DIR
+          value: "/data/output"
+        - name: DATA_TEMP_DIR
+          value: "/data/temp"
+        volumeMounts:
+        - name: data-processing-config
+          mountPath: /app/data_processing/config.json
+          subPath: config.json
+        - name: data-volume
+          mountPath: /data
+        livenessProbe:
+          exec:
+            command:
+            - python
+            - -c
+            - "import os; exit(0 if os.path.exists('/app/data_processing') else 1)"
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          exec:
+            command:
+            - python
+            - -c
+            - "import os; exit(0 if os.path.exists('/app/data_processing') else 1)"
+          initialDelaySeconds: 5
+          periodSeconds: 5
+      volumes:
+      - name: data-processing-config
+        configMap:
+          name: data-processing-config
+      - name: data-volume
+        persistentVolumeClaim:
+          claimName: processing-data-pvc
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: data-processing-config
+  namespace: road-object-detection
+data:
+  config.json: |
+    {
+      "input_dir": "/data/input",
+      "output_dir": "/data/output",
+      "temp_dir": "/data/temp",
+      "validation": {
+        "min_image_size": [640, 480],
+        "max_image_size": [4096, 4096],
+        "min_objects_per_image": 1,
+        "required_classes": ["car", "pedestrian", "bicycle"],
+        "min_class_instances": {
+          "bicycle": 100,
+          "cyclist": 100
+        }
+      },
+      "transformation": {
+        "target_size": [640, 640],
+        "normalize": true,
+        "convert_to_format": "yolo"
+      },
+      "augmentation": {
+        "augmentation_types": ["flip", "rotate", "brightness", "contrast", "noise"],
+        "augmentation_per_image": 3,
+        "cyclist_augmentation_factor": 2.0,
+        "include_original": true
+      },
+      "aws": {
+        "s3_bucket": "${S3_PROCESSED_DATA_BUCKET}",
+        "s3_prefix": "processed_data"
+      }
+    }
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: processing-data-pvc
+  namespace: road-object-detection
+spec:
+  accessModes:
+    - ReadWriteMany
+  storageClassName: efs-sc
+  resources:
+    requests:
+      storage: 100Gi

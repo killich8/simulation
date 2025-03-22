@@ -1,0 +1,117 @@
+version: '3.8'
+
+services:
+  # CARLA Simulator Service
+  carla-simulator:
+    image: ${ECR_REPOSITORY_URL}/carla-simulation:latest
+    build:
+      context: ./carla_simulation
+      dockerfile: Dockerfile
+    ports:
+      - "2000-2002:2000-2002"
+    volumes:
+      - ./carla_simulation/config:/app/config
+      - ./carla_simulation/output:/app/output
+    environment:
+      - CARLA_SERVER_TIMEOUT=100
+      - CARLA_TOWN=Town05
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  # Data Processing Service
+  data-processing:
+    image: ${ECR_REPOSITORY_URL}/data-processing:latest
+    build:
+      context: ./data_processing
+      dockerfile: Dockerfile
+    volumes:
+      - ./carla_simulation/output:/app/input
+      - ./data_processing/output:/app/output
+    environment:
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+      - AWS_REGION=${AWS_REGION}
+      - S3_BUCKET_NAME=${S3_BUCKET_NAME}
+    depends_on:
+      - carla-simulator
+
+  # Model Training Service
+  model-training:
+    image: ${ECR_REPOSITORY_URL}/model-training:latest
+    build:
+      context: ./model_training
+      dockerfile: Dockerfile
+    volumes:
+      - ./model_training/config:/app/config
+      - ./model_training/output:/app/output
+    environment:
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+      - AWS_REGION=${AWS_REGION}
+      - S3_BUCKET_NAME=${S3_BUCKET_NAME}
+      - WANDB_API_KEY=${WANDB_API_KEY}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  # Model Inference Service
+  model-inference:
+    image: ${ECR_REPOSITORY_URL}/model-inference:latest
+    build:
+      context: ./model_training
+      dockerfile: Dockerfile.inference
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./model_training/models:/app/models
+    environment:
+      - MODEL_PATH=/app/models/best.pt
+      - CONFIDENCE_THRESHOLD=0.5
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  # Prometheus for Monitoring
+  prometheus:
+    image: prom/prometheus:latest
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/usr/share/prometheus/console_libraries'
+      - '--web.console.templates=/usr/share/prometheus/consoles'
+
+  # Grafana for Visualization
+  grafana:
+    image: grafana/grafana:latest
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning
+      - grafana_data:/var/lib/grafana
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD}
+      - GF_USERS_ALLOW_SIGN_UP=false
+    depends_on:
+      - prometheus
+
+volumes:
+  prometheus_data:
+  grafana_data:

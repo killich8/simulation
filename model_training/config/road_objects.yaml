@@ -1,0 +1,41 @@
+# YOLOv5 Road Object Detection Dataset
+# Dataset for road object detection with focus on underrepresented classes like cyclists
+
+# Dataset root directory
+path: ../datasets/road_objects  # dataset root dir
+train: images/train  # train images (relative to 'path')
+val: images/val  # val images (relative to 'path')
+test: images/test  # test images (optional)
+
+# Classes
+names:
+  0: person
+  1: bicycle
+  2: car
+  3: motorcycle
+  4: bus
+  5: truck
+  6: traffic light
+  7: stop sign
+  8: cyclist  # Added as a separate class to increase focus
+  9: pedestrian_crossing
+  10: construction_sign
+  11: construction_cone
+  12: construction_barrier
+
+# Class weights for handling class imbalance
+# Higher weights for underrepresented classes
+class_weights:
+  0: 1.0  # person
+  1: 1.0  # bicycle
+  2: 0.5  # car (overrepresented)
+  3: 1.0  # motorcycle
+  4: 1.0  # bus
+  5: 1.0  # truck
+  6: 1.0  # traffic light
+  7: 1.0  # stop sign
+  8: 3.0  # cyclist (underrepresented, higher weight)
+  9: 1.5  # pedestrian_crossing
+  10: 1.5  # construction_sign
+  11: 1.5  # construction_cone
+  12: 1.5  # construction_barrier

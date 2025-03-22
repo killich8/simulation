@@ -1,0 +1,445 @@
+pipeline {
+    agent {
+        kubernetes {
+            yaml """
+apiVersion: v1
+kind: Pod
+metadata:
+  labels:
+    app: jenkins-agent
+spec:
+  serviceAccountName: jenkins
+  containers:
+  - name: jnlp
+    image: jenkins/inbound-agent:latest
+  - name: docker
+    image: docker:latest
+    command: ['cat']
+    tty: true
+    volumeMounts:
+    - name: docker-sock
+      mountPath: /var/run/docker.sock
+  - name: kubectl
+    image: bitnami/kubectl:latest
+    command: ['cat']
+    tty: true
+  - name: terraform
+    image: hashicorp/terraform:latest
+    command: ['cat']
+    tty: true
+  - name: aws
+    image: amazon/aws-cli:latest
+    command: ['cat']
+    tty: true
+  volumes:
+  - name: docker-sock
+    hostPath:
+      path: /var/run/docker.sock
+"""
+        }
+    }
+
+    environment {
+        AWS_REGION = 'us-east-1'
+        AWS_ACCOUNT_ID = credentials('aws-account-id')
+        ECR_REGISTRY = "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+        PROJECT_NAME = 'road-object-detection'
+        GITHUB_REPO = 'https://github.com/your-org/road-object-detection-project.git'
+        BRANCH_NAME = 'main'
+        
+        // ECR Repository names
+        CARLA_SIMULATION_REPO = "${PROJECT_NAME}/carla-simulation"
+        DATA_PROCESSING_REPO = "${PROJECT_NAME}/data-processing"
+        MODEL_TRAINING_REPO = "${PROJECT_NAME}/model-training"
+        MODEL_INFERENCE_REPO = "${PROJECT_NAME}/model-inference"
+        
+        // Kubernetes namespace
+        K8S_NAMESPACE = 'road-object-detection'
+        
+        // Credentials
+        AWS_CREDENTIALS = credentials('aws-credentials')
+    }
+
+    options {
+        buildDiscarder(logRotator(numToKeepStr: '10'))
+        timeout(time: 2, unit: 'HOURS')
+        disableConcurrentBuilds()
+    }
+
+    triggers {
+        pollSCM('H/15 * * * *')
+    }
+
+    stages {
+        stage('Checkout') {
+            steps {
+                checkout scm
+                script {
+                    // Set build version based on timestamp and build number
+                    env.BUILD_VERSION = sh(script: "date +%Y%m%d%H%M%S-${BUILD_NUMBER}", returnStdout: true).trim()
+                    echo "Build version: ${env.BUILD_VERSION}"
+                }
+            }
+        }
+
+        stage('Static Code Analysis') {
+            parallel {
+                stage('Python Lint') {
+                    steps {
+                        container('docker') {
+                            sh '''
+                            docker run --rm -v $(pwd):/app -w /app python:3.9-slim bash -c "
+                                pip install flake8 pylint
+                                flake8 --max-line-length=120 --exclude=.git,__pycache__,build,dist
+                                pylint --disable=C0111,C0103,C0303,W1201,W1202 carla_simulation data_processing model_training model_inference
+                            "
+                            '''
+                        }
+                    }
+                }
+                
+                stage('Dockerfile Lint') {
+                    steps {
+                        container('docker') {
+                            sh '''
+                            docker run --rm -v $(pwd):/app -w /app hadolint/hadolint:latest-debian hadolint \
+                                containerization/carla-simulation/Dockerfile \
+                                containerization/data-processing/Dockerfile \
+                                containerization/model-training/Dockerfile \
+                                containerization/model-inference/Dockerfile
+                            '''
+                        }
+                    }
+                }
+                
+                stage('Terraform Validate') {
+                    steps {
+                        container('terraform') {
+                            sh '''
+                            cd aws_infrastructure/environments
+                            terraform init -backend=false
+                            terraform validate
+                            '''
+                        }
+                    }
+                }
+                
+                stage('Kubernetes Manifests Validate') {
+                    steps {
+                        container('kubectl') {
+                            sh '''
+                            for file in containerization/kubernetes/*.yaml; do
+                                kubectl --dry-run=client -o yaml apply -f $file > /dev/null
+                            done
+                            '''
+                        }
+                    }
+                }
+            }
+        }
+
+        stage('Unit Tests') {
+            steps {
+                container('docker') {
+                    sh '''
+                    docker run --rm -v $(pwd):/app -w /app python:3.9-slim bash -c "
+                        pip install -r requirements.txt
+                        pip install pytest pytest-cov
+                        python -m pytest carla_simulation/test_*.py data_processing/validation/test_*.py --cov=. --cov-report=xml
+                    "
+                    '''
+                }
+            }
+            post {
+                always {
+                    junit 'test-results/*.xml'
+                    cobertura coberturaReportFile: 'coverage.xml'
+                }
+            }
+        }
+
+        stage('Security Scan') {
+            parallel {
+                stage('Dependency Check') {
+                    steps {
+                        container('docker') {
+                            sh '''
+                            docker run --rm -v $(pwd):/app -w /app python:3.9-slim bash -c "
+                                pip install safety
+                                safety check -r requirements.txt --json > safety-report.json || true
+                            "
+                            '''
+                        }
+                    }
+                    post {
+                        always {
+                            archiveArtifacts artifacts: 'safety-report.json', allowEmptyArchive: true
+                        }
+                    }
+                }
+                
+                stage('Container Security Scan') {
+                    steps {
+                        container('docker') {
+                            sh '''
+                            docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v $(pwd):/app aquasec/trivy:latest \
+                                fs --security-checks vuln,config --severity HIGH,CRITICAL ./containerization
+                            '''
+                        }
+                    }
+                }
+                
+                stage('Secret Scan') {
+                    steps {
+                        container('docker') {
+                            sh '''
+                            docker run --rm -v $(pwd):/app -w /app zricethezav/gitleaks:latest detect --source="/app" --verbose --report-path=gitleaks-report.json || true
+                            '''
+                        }
+                    }
+                    post {
+                        always {
+                            archiveArtifacts artifacts: 'gitleaks-report.json', allowEmptyArchive: true
+                        }
+                    }
+                }
+            }
+        }
+
+        stage('Build Docker Images') {
+            parallel {
+                stage('Build CARLA Simulation Image') {
+                    steps {
+                        container('docker') {
+                            sh '''
+                            # Copy necessary files to build context
+                            mkdir -p build/carla-simulation
+                            cp -r carla_simulation/* build/carla-simulation/
+                            cp requirements.txt build/carla-simulation/
+                            cp containerization/carla-simulation/Dockerfile build/carla-simulation/
+                            cp containerization/carla-simulation/docker-entrypoint.sh build/carla-simulation/
+                            
+                            # Build the image
+                            cd build/carla-simulation
+                            docker build -t ${ECR_REGISTRY}/${CARLA_SIMULATION_REPO}:${BUILD_VERSION} -t ${ECR_REGISTRY}/${CARLA_SIMULATION_REPO}:latest .
+                            '''
+                        }
+                    }
+                }
+                
+                stage('Build Data Processing Image') {
+                    steps {
+                        container('docker') {
+                            sh '''
+                            # Copy necessary files to build context
+                            mkdir -p build/data-processing
+                            cp -r data_processing build/data-processing/
+                            cp requirements.txt build/data-processing/
+                            cp containerization/data-processing/Dockerfile build/data-processing/
+                            cp containerization/data-processing/docker-entrypoint.sh build/data-processing/
+                            
+                            # Build the image
+                            cd build/data-processing
+                            docker build -t ${ECR_REGISTRY}/${DATA_PROCESSING_REPO}:${BUILD_VERSION} -t ${ECR_REGISTRY}/${DATA_PROCESSING_REPO}:latest .
+                            '''
+                        }
+                    }
+                }
+                
+                stage('Build Model Training Image') {
+                    steps {
+                        container('docker') {
+                            sh '''
+                            # Copy necessary files to build context
+                            mkdir -p build/model-training
+                            cp -r model_training build/model-training/
+                            cp requirements.txt build/model-training/
+                            cp containerization/model-training/Dockerfile build/model-training/
+                            cp containerization/model-training/docker-entrypoint.sh build/model-training/
+                            
+                            # Build the image
+                            cd build/model-training
+                            docker build -t ${ECR_REGISTRY}/${MODEL_TRAINING_REPO}:${BUILD_VERSION} -t ${ECR_REGISTRY}/${MODEL_TRAINING_REPO}:latest .
+                            '''
+                        }
+                    }
+                }
+                
+                stage('Build Model Inference Image') {
+                    steps {
+                        container('docker') {
+                            sh '''
+                            # Copy necessary files to build context
+                            mkdir -p build/model-inference
+                            cp -r model_inference build/model-inference/
+                            cp requirements.txt build/model-inference/
+                            cp containerization/model-inference/Dockerfile build/model-inference/
+                            cp containerization/model-inference/docker-entrypoint.sh build/model-inference/
+                            
+                            # Build the image
+                            cd build/model-inference
+                            docker build -t ${ECR_REGISTRY}/${MODEL_INFERENCE_REPO}:${BUILD_VERSION} -t ${ECR_REGISTRY}/${MODEL_INFERENCE_REPO}:latest .
+                            '''
+                        }
+                    }
+                }
+            }
+        }
+
+        stage('Push Docker Images') {
+            when {
+                branch 'main'
+            }
+            steps {
+                container('aws') {
+                    withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', credentialsId: 'aws-credentials', accessKeyVariable: 'AWS_ACCESS_KEY_ID', secretKeyVariable: 'AWS_SECRET_ACCESS_KEY']]) {
+                        sh '''
+                        # Login to ECR
+                        aws ecr get-login-password --region ${AWS_REGION} | docker login --username AWS --password-stdin ${ECR_REGISTRY}
+                        
+                        # Create repositories if they don't exist
+                        aws ecr describe-repositories --repository-names ${CARLA_SIMULATION_REPO} --region ${AWS_REGION} || \
+                            aws ecr create-repository --repository-name ${CARLA_SIMULATION_REPO} --region ${AWS_REGION}
+                        
+                        aws ecr describe-repositories --repository-names ${DATA_PROCESSING_REPO} --region ${AWS_REGION} || \
+                            aws ecr create-repository --repository-name ${DATA_PROCESSING_REPO} --region ${AWS_REGION}
+                        
+                        aws ecr describe-repositories --repository-names ${MODEL_TRAINING_REPO} --region ${AWS_REGION} || \
+                            aws ecr create-repository --repository-name ${MODEL_TRAINING_REPO} --region ${AWS_REGION}
+                        
+                        aws ecr describe-repositories --repository-names ${MODEL_INFERENCE_REPO} --region ${AWS_REGION} || \
+                            aws ecr create-repository --repository-name ${MODEL_INFERENCE_REPO} --region ${AWS_REGION}
+                        
+                        # Push images
+                        docker push ${ECR_REGISTRY}/${CARLA_SIMULATION_REPO}:${BUILD_VERSION}
+                        docker push ${ECR_REGISTRY}/${CARLA_SIMULATION_REPO}:latest
+                        
+                        docker push ${ECR_REGISTRY}/${DATA_PROCESSING_REPO}:${BUILD_VERSION}
+                        docker push ${ECR_REGISTRY}/${DATA_PROCESSING_REPO}:latest
+                        
+                        docker push ${ECR_REGISTRY}/${MODEL_TRAINING_REPO}:${BUILD_VERSION}
+                        docker push ${ECR_REGISTRY}/${MODEL_TRAINING_REPO}:latest
+                        
+                        docker push ${ECR_REGISTRY}/${MODEL_INFERENCE_REPO}:${BUILD_VERSION}
+                        docker push ${ECR_REGISTRY}/${MODEL_INFERENCE_REPO}:latest
+                        '''
+                    }
+                }
+            }
+        }
+
+        stage('Deploy to Kubernetes') {
+            when {
+                branch 'main'
+            }
+            steps {
+                container('kubectl') {
+                    withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', credentialsId: 'aws-credentials', accessKeyVariable: 'AWS_ACCESS_KEY_ID', secretKeyVariable: 'AWS_SECRET_ACCESS_KEY']]) {
+                        sh '''
+                        # Update kubeconfig
+                        aws eks update-kubeconfig --name ${PROJECT_NAME}-cluster --region ${AWS_REGION}
+                        
+                        # Create namespace if it doesn't exist
+                        kubectl get namespace ${K8S_NAMESPACE} || kubectl create namespace ${K8S_NAMESPACE}
+                        
+                        # Create AWS config and secrets
+                        kubectl -n ${K8S_NAMESPACE} create configmap aws-config \
+                            --from-literal=region=${AWS_REGION} \
+                            --from-literal=raw_data_bucket=${PROJECT_NAME}-raw-data \
+                            --from-literal=processed_data_bucket=${PROJECT_NAME}-processed-data \
+                            --from-literal=model_artifacts_bucket=${PROJECT_NAME}-model-artifacts \
+                            --from-literal=logs_bucket=${PROJECT_NAME}-logs \
+                            --dry-run=client -o yaml | kubectl apply -f -
+                        
+                        kubectl -n ${K8S_NAMESPACE} create secret generic aws-credentials \
+                            --from-literal=access_key=${AWS_ACCESS_KEY_ID} \
+                            --from-literal=secret_key=${AWS_SECRET_ACCESS_KEY} \
+                            --dry-run=client -o yaml | kubectl apply -f -
+                        
+                        # Process and apply Kubernetes manifests
+                        for file in containerization/kubernetes/*.yaml; do
+                            # Replace variables in the manifest
+                            sed -e "s|\${AWS_ACCOUNT_ID}|${AWS_ACCOUNT_ID}|g" \
+                                -e "s|\${AWS_REGION}|${AWS_REGION}|g" \
+                                -e "s|\${S3_RAW_DATA_BUCKET}|${PROJECT_NAME}-raw-data|g" \
+                                -e "s|\${S3_PROCESSED_DATA_BUCKET}|${PROJECT_NAME}-processed-data|g" \
+                                -e "s|\${S3_MODEL_ARTIFACTS_BUCKET}|${PROJECT_NAME}-model-artifacts|g" \
+                                -e "s|\${S3_LOGS_BUCKET}|${PROJECT_NAME}-logs|g" \
+                                -e "s|\${EFS_FILESYSTEM_ID}|fs-12345678|g" \
+                                -e "s|\${IAM_ROLE_ARN}|arn:aws:iam::${AWS_ACCOUNT_ID}:role/${PROJECT_NAME}-eks-role|g" \
+                                $file | kubectl apply -f -
+                        done
+                        
+                        # Verify deployments
+                        kubectl -n ${K8S_NAMESPACE} get deployments
+                        '''
+                    }
+                }
+            }
+        }
+
+        stage('Integration Tests') {
+            when {
+                branch 'main'
+            }
+            steps {
+                container('docker') {
+                    sh '''
+                    # Run integration tests against deployed services
+                    docker run --rm -v $(pwd):/app -w /app python:3.9-slim bash -c "
+                        pip install -r requirements.txt
+                        pip install pytest requests
+                        python -m pytest integration_tests/ --junitxml=test-results/integration-tests.xml
+                    "
+                    '''
+                }
+            }
+            post {
+                always {
+                    junit 'test-results/integration-tests.xml'
+                }
+            }
+        }
+
+        stage('Performance Tests') {
+            when {
+                branch 'main'
+            }
+            steps {
+                container('docker') {
+                    sh '''
+                    # Run performance tests against deployed services
+                    docker run --rm -v $(pwd):/app -w /app loadimpact/k6:latest run /app/performance_tests/k6_tests.js
+                    '''
+                }
+            }
+        }
+    }
+
+    post {
+        always {
+            // Clean up resources
+            container('docker') {
+                sh '''
+                docker system prune -f
+                '''
+            }
+            
+            // Send notifications
+            emailext (
+                subject: "${currentBuild.currentResult}: Job '${env.JOB_NAME} [${env.BUILD_NUMBER}]'",
+                body: """<p>${currentBuild.currentResult}: Job '${env.JOB_NAME} [${env.BUILD_NUMBER}]':</p>
+                <p>Check console output at <a href='${env.BUILD_URL}'>${env.JOB_NAME} [${env.BUILD_NUMBER}]</a></p>""",
+                recipientProviders: [[$class: 'DevelopersRecipientProvider'], [$class: 'RequesterRecipientProvider']]
+            )
+        }
+        
+        success {
+            echo 'Pipeline completed successfully!'
+        }
+        
+        failure {
+            echo 'Pipeline failed!'
+        }
+    }
+}
